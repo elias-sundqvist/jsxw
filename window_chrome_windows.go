@@ -15,18 +15,22 @@ const (
 	dwmwaBorderColor          = 34
 	dwmwaCaptionColor         = 35
 	dwmwaTextColor            = 36
+	dwmColorNone              = 0xFFFFFFFE
 
-	wsExDlgModalFrame = 0x00000001
-	wmSetIcon         = 0x0080
-	iconSmall         = 0
-	iconBig           = 1
-	swpNoSize         = 0x0001
-	swpNoMove         = 0x0002
-	swpNoZOrder       = 0x0004
-	swpNoActivate     = 0x0010
-	swpFrameChanged   = 0x0020
+	wsExDlgModalFrame       = 0x00000001
+	wsOverlappedWindow      = 0x00CF0000
+	wmSetIcon               = 0x0080
+	iconSmall               = 0
+	iconBig                 = 1
+	monitorDefaultToNearest = 0x00000002
+	swpNoSize               = 0x0001
+	swpNoMove               = 0x0002
+	swpNoZOrder             = 0x0004
+	swpNoActivate           = 0x0010
+	swpFrameChanged         = 0x0020
 )
 
+const gwlStyle = ^uintptr(15)
 const gwlExstyle = ^uintptr(19)
 const gclpHIcon = ^uintptr(13)
 const gclpHIconSm = ^uintptr(33)
@@ -38,6 +42,10 @@ var (
 	procCreateIcon            = user32DLL.NewProc("CreateIcon")
 	procGetWindowLongPtrW     = user32DLL.NewProc("GetWindowLongPtrW")
 	procSetWindowLongPtrW     = user32DLL.NewProc("SetWindowLongPtrW")
+	procGetWindowPlacement    = user32DLL.NewProc("GetWindowPlacement")
+	procSetWindowPlacement    = user32DLL.NewProc("SetWindowPlacement")
+	procMonitorFromWindow     = user32DLL.NewProc("MonitorFromWindow")
+	procGetMonitorInfoW       = user32DLL.NewProc("GetMonitorInfoW")
 	procSetClassLongPtrW      = user32DLL.NewProc("SetClassLongPtrW")
 	procSendMessageW          = user32DLL.NewProc("SendMessageW")
 	procSetWindowPos          = user32DLL.NewProc("SetWindowPos")
@@ -56,30 +64,147 @@ type windowChromeTheme struct {
 	Text    *rgbColor `json:"text"`
 }
 
+type winPoint struct {
+	X int32
+	Y int32
+}
+
+type winRect struct {
+	Left   int32
+	Top    int32
+	Right  int32
+	Bottom int32
+}
+
+type windowPlacement struct {
+	Length           uint32
+	Flags            uint32
+	ShowCmd          uint32
+	PtMinPosition    winPoint
+	PtMaxPosition    winPoint
+	RcNormalPosition winRect
+}
+
+type monitorInfo struct {
+	CbSize    uint32
+	RcMonitor winRect
+	RcWork    winRect
+	DwFlags   uint32
+}
+
+type windowFullscreenState struct {
+	enabled   bool
+	style     uintptr
+	exStyle   uintptr
+	placement windowPlacement
+	theme     windowChromeTheme
+}
+
 func initWindowChrome(w webview_selector.WebView) error {
 	hwnd := uintptr(w.Window())
 	if hwnd == 0 {
 		return fmt.Errorf("missing native window handle")
 	}
+	fullscreen := &windowFullscreenState{}
 
 	// Keep the native frame, but remove the caption text and icon for a cleaner look.
 	w.SetTitle("")
 	_ = hideWindowCaptionIcon(hwnd)
 
 	// Start from a neutral dark frame so the initial white caption flash is minimized.
-	_ = applyWindowChromeTheme(hwnd, windowChromeTheme{
+	fullscreen.theme = windowChromeTheme{
 		Caption: &rgbColor{R: 10, G: 14, B: 23},
 		Border:  &rgbColor{R: 30, G: 41, B: 59},
 		Text:    &rgbColor{R: 226, G: 232, B: 240},
-	})
+	}
+	_ = applyWindowChromeTheme(hwnd, fullscreen.theme)
 
 	if err := w.Bind("__codexSetWindowChrome", func(theme windowChromeTheme) error {
+		fullscreen.theme = theme
 		return applyWindowChromeTheme(hwnd, theme)
 	}); err != nil {
 		return err
 	}
 
+	if err := w.Bind("__codexSetNativeFullscreen", func(enabled bool) error {
+		return setWindowFullscreen(hwnd, fullscreen, enabled)
+	}); err != nil {
+		return err
+	}
+
 	w.Init(windowChromeBridgeJS)
+	return nil
+}
+
+func setWindowFullscreen(hwnd uintptr, state *windowFullscreenState, enabled bool) error {
+	if err := user32DLL.Load(); err != nil {
+		return err
+	}
+
+	if enabled {
+		if state.enabled {
+			return nil
+		}
+
+		style, _, _ := procGetWindowLongPtrW.Call(hwnd, uintptr(gwlStyle))
+		exStyle, _, _ := procGetWindowLongPtrW.Call(hwnd, uintptr(gwlExstyle))
+		placement := windowPlacement{Length: uint32(unsafe.Sizeof(windowPlacement{}))}
+		r1, _, getPlacementErr := procGetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&placement)))
+		if r1 == 0 {
+			if getPlacementErr != windows.ERROR_SUCCESS && getPlacementErr != nil {
+				return getPlacementErr
+			}
+			return fmt.Errorf("GetWindowPlacement failed")
+		}
+
+		monitor, _, _ := procMonitorFromWindow.Call(hwnd, monitorDefaultToNearest)
+		if monitor == 0 {
+			return fmt.Errorf("MonitorFromWindow failed")
+		}
+
+		info := monitorInfo{CbSize: uint32(unsafe.Sizeof(monitorInfo{}))}
+		r1, _, getMonitorErr := procGetMonitorInfoW.Call(monitor, uintptr(unsafe.Pointer(&info)))
+		if r1 == 0 {
+			if getMonitorErr != windows.ERROR_SUCCESS && getMonitorErr != nil {
+				return getMonitorErr
+			}
+			return fmt.Errorf("GetMonitorInfoW failed")
+		}
+
+		state.style = style
+		state.exStyle = exStyle
+		state.placement = placement
+		state.enabled = true
+
+		procSetWindowLongPtrW.Call(hwnd, uintptr(gwlStyle), style&^uintptr(wsOverlappedWindow))
+		procSetWindowLongPtrW.Call(hwnd, uintptr(gwlExstyle), exStyle&^uintptr(wsExDlgModalFrame))
+		borderNone := uint32(dwmColorNone)
+		_ = dwmSetWindowAttribute(hwnd, dwmwaBorderColor, unsafe.Pointer(&borderNone), uint32(unsafe.Sizeof(borderNone)))
+		procSetWindowPos.Call(
+			hwnd,
+			0,
+			uintptr(info.RcMonitor.Left),
+			uintptr(info.RcMonitor.Top),
+			uintptr(info.RcMonitor.Right-info.RcMonitor.Left),
+			uintptr(info.RcMonitor.Bottom-info.RcMonitor.Top),
+			swpNoZOrder|swpNoActivate|swpFrameChanged,
+		)
+		return nil
+	}
+
+	if !state.enabled {
+		return nil
+	}
+
+	procSetWindowLongPtrW.Call(hwnd, uintptr(gwlStyle), state.style)
+	procSetWindowLongPtrW.Call(hwnd, uintptr(gwlExstyle), state.exStyle)
+	if state.theme.Caption != nil {
+		_ = applyWindowChromeTheme(hwnd, state.theme)
+	}
+	state.placement.Length = uint32(unsafe.Sizeof(windowPlacement{}))
+	procSetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&state.placement)))
+	procSetWindowPos.Call(hwnd, 0, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoZOrder|swpNoActivate|swpFrameChanged)
+	state.enabled = false
 	return nil
 }
 
@@ -195,6 +320,8 @@ const windowChromeBridgeJS = `(function () {
   const fallback = { r: 10, g: 14, b: 23 };
   let lastSent = "";
   let scheduled = false;
+  let fullscreenElement = null;
+  let nativeFullscreen = false;
 
   function normalizeColor(input) {
     if (!input || typeof input !== "string") {
@@ -338,6 +465,67 @@ const windowChromeBridgeJS = `(function () {
     }
     scheduled = true;
     requestAnimationFrame(sendTheme);
+  }
+
+  function dispatchFullscreenEvent(type, target) {
+    const event = new Event(type, { bubbles: false, cancelable: false });
+    (target || document).dispatchEvent(event);
+  }
+
+  if (typeof window.__codexSetNativeFullscreen === "function" && typeof Element !== "undefined") {
+    const requestHostFullscreen = (element) => {
+      return window.__codexSetNativeFullscreen(true).then(() => {
+        fullscreenElement = element || document.documentElement;
+        nativeFullscreen = true;
+        dispatchFullscreenEvent("fullscreenchange", document);
+      }).catch((error) => {
+        dispatchFullscreenEvent("fullscreenerror", element || document);
+        throw error;
+      });
+    };
+
+    const exitHostFullscreen = () => {
+      return window.__codexSetNativeFullscreen(false).then(() => {
+        fullscreenElement = null;
+        nativeFullscreen = false;
+        dispatchFullscreenEvent("fullscreenchange", document);
+      }).catch((error) => {
+        dispatchFullscreenEvent("fullscreenerror", document);
+        throw error;
+      });
+    };
+
+    Object.defineProperty(document, "fullscreenEnabled", {
+      configurable: true,
+      get() {
+        return true;
+      },
+    });
+
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get() {
+        return fullscreenElement;
+      },
+    });
+
+    Object.defineProperty(document, "webkitFullscreenElement", {
+      configurable: true,
+      get() {
+        return fullscreenElement;
+      },
+    });
+
+    Element.prototype.requestFullscreen = function () {
+      return requestHostFullscreen(this);
+    };
+
+    document.exitFullscreen = function () {
+      if (!nativeFullscreen) {
+        return Promise.resolve();
+      }
+      return exitHostFullscreen();
+    };
   }
 
   document.addEventListener("DOMContentLoaded", scheduleThemeSync);

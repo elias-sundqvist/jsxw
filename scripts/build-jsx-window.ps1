@@ -10,7 +10,7 @@ if (-not (Test-Path (Join-Path $repoRoot "node_modules"))) {
 
 Push-Location $repoRoot
 try {
-    go build -o $OutputPath .
+    go build -ldflags='-H=windowsgui' -o $OutputPath .
     if ($LASTEXITCODE -ne 0) {
         throw "go build failed."
     }
