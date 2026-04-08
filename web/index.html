@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>esbuild + webview (no server)</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data: blob:;">
+    <style>
+      :root {
+        color-scheme: dark;
+        --codex-host-bg: rgb(10, 14, 23);
+        --codex-host-border: rgb(30, 41, 59);
+        --codex-host-text: rgb(226, 232, 240);
+        --codex-scrollbar-track: rgb(9, 13, 20);
+        --codex-scrollbar-thumb: rgb(43, 57, 80);
+        --codex-scrollbar-thumb-hover: rgb(67, 86, 118);
+      }
+
+      html, body, #app {
+        margin: 0;
+        min-height: 100%;
+        background: var(--codex-host-bg);
+      }
+
+      body {
+        color: var(--codex-host-text);
+      }
+
+      #app {
+        isolation: isolate;
+      }
+
+      * {
+        scrollbar-width: thin;
+        scrollbar-color: var(--codex-scrollbar-thumb) var(--codex-scrollbar-track);
+      }
+
+      *::-webkit-scrollbar {
+        width: 12px;
+        height: 12px;
+      }
+
+      *::-webkit-scrollbar-track {
+        background: var(--codex-scrollbar-track);
+      }
+
+      *::-webkit-scrollbar-thumb {
+        background: var(--codex-scrollbar-thumb);
+        border: 3px solid var(--codex-scrollbar-track);
+        border-radius: 999px;
+      }
+
+      *::-webkit-scrollbar-thumb:hover {
+        background: var(--codex-scrollbar-thumb-hover);
+      }
+
+      *::-webkit-scrollbar-corner {
+        background: var(--codex-scrollbar-track);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">Loading…</div>
+    <!--JS-->
+  </body>
+</html>

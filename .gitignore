@@ -1,0 +1,4 @@
+node_modules/
+*.exe
+*.exe~
+debug-bundle.js

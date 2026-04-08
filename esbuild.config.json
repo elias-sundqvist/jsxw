@@ -1,0 +1,22 @@
+{
+    "platform": "browser",
+    "target": "es2020",
+    "logLevel": "silent",
+    "minify": true,
+  
+    "define": {
+      "process.env.NODE_ENV": "development",
+      "global": "window"
+    },
+  
+    "jsx": "automatic",
+    "jsxImportSource": "react",
+  
+    "loaders": {
+      ".js": "jsx",
+      ".jsx": "jsx",
+      ".tsx": "tsx",
+      ".css": "text"
+    }
+}
+  
