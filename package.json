@@ -1,15 +1,47 @@
 {
-  "name": "wgo",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "name": "jsx-window",
+  "version": "0.2.0",
+  "description": "Run JSX and TSX files as native desktop windows on Windows.",
+  "main": "bin/jsxx.js",
+  "bin": {
+    "jsxx": "bin/jsxx.js"
   },
-  "keywords": [],
-  "author": "",
+  "scripts": {
+    "build:exe": "powershell -ExecutionPolicy Bypass -File ./scripts/build-jsx-window.ps1",
+    "prepack": "npm run build:exe",
+    "test": "go test ./..."
+  },
+  "files": [
+    "bin/",
+    "scripts/register-jsx-window.ps1",
+    "web/",
+    "jsx-window.exe"
+  ],
+  "keywords": [
+    "jsx",
+    "tsx",
+    "react",
+    "desktop",
+    "webview",
+    "windows"
+  ],
+  "author": "Elias Sundqvist",
   "license": "ISC",
   "type": "commonjs",
+  "os": [
+    "win32"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/elias-sundqvist/jsxw.git"
+  },
+  "homepage": "https://github.com/elias-sundqvist/jsxw",
+  "bugs": {
+    "url": "https://github.com/elias-sundqvist/jsxw/issues"
+  },
   "dependencies": {
     "react": "^19.1.1",
     "react-dom": "^19.1.1"

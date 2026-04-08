@@ -4,7 +4,7 @@ param(
 )
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$progID = "Wgo.JSX.Window"
+$progID = "Jsxx.JSX.Window"
 $menuKey = "HKCU:\Software\Classes\SystemFileAssociations\.jsx\shell\OpenInJsxWindow"
 $progKey = "HKCU:\Software\Classes\$progID"
 

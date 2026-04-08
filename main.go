@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -103,9 +104,12 @@ var mainJS string
 var styleCSS string
 
 type appMode struct {
-	entryPath string
-	title     string
-	watchDir  string
+	entryPath      string
+	inlineSource   string
+	inlineExt      string
+	inlineBaseDir  string
+	title          string
+	watchDir       string
 }
 
 type appBundleStore struct {
@@ -187,37 +191,39 @@ func main() {
 	}
 	w.Navigate(dataURL)
 
-	// Always watch files and live-reload the page when something changes
-	go func() {
-		if err := watchAndReload(mode.watchDir, func() {
-			if mode.entryPath != "" {
-				bundle, err := buildAppBundle(appRoot, mode)
-				if err != nil {
-					log.Println("reload bundle:", err)
+	if mode.watchDir != "" {
+		// Always watch files and live-reload the page when something changes
+		go func() {
+			if err := watchAndReload(mode.watchDir, func() {
+				if mode.entryPath != "" {
+					bundle, err := buildAppBundle(appRoot, mode)
+					if err != nil {
+						log.Println("reload bundle:", err)
+						return
+					}
+					bundleStore.set(bundle)
+
+					w.Dispatch(func() {
+						w.Eval(`window.__codexReloadFromHost && window.__codexReloadFromHost()`)
+					})
 					return
 				}
-				bundleStore.set(bundle)
+
+				final, err := buildHTML(appRoot, mode)
+				if err != nil {
+					log.Println("reload:", err)
+					return
+				}
+				url := makeDataURL(final)
 
 				w.Dispatch(func() {
-					w.Eval(`window.__codexReloadFromHost && window.__codexReloadFromHost()`)
+					w.Navigate(url)
 				})
-				return
+			}); err != nil {
+				log.Println("watch:", err)
 			}
-
-			final, err := buildHTML(appRoot, mode)
-			if err != nil {
-				log.Println("reload:", err)
-				return
-			}
-			url := makeDataURL(final)
-
-			w.Dispatch(func() {
-				w.Navigate(url)
-			})
-		}); err != nil {
-			log.Println("watch:", err)
-		}
-	}()
+		}()
+	}
 
 	w.Run()
 }
@@ -262,11 +268,96 @@ func detectAppMode(appRoot string, args []string) (appMode, error) {
 		title:    "esbuild -> webview (no server)",
 		watchDir: filepath.Join(appRoot, "web"),
 	}
-	if len(args) == 0 {
-		return mode, nil
+	var (
+		entryArg       string
+		inlineCode     string
+		inlineExt      = ".jsx"
+		loaderExplicit bool
+		useStdin       bool
+	)
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-e", "--eval":
+			if i+1 >= len(args) {
+				return appMode{}, fmt.Errorf("%s requires an inline source string", args[i])
+			}
+			inlineCode = args[i+1]
+			i++
+		case "--loader":
+			if i+1 >= len(args) {
+				return appMode{}, fmt.Errorf("--loader requires one of: js, jsx, ts, tsx")
+			}
+			ext, err := normalizeInlineExt(args[i+1])
+			if err != nil {
+				return appMode{}, err
+			}
+			inlineExt = ext
+			loaderExplicit = true
+			i++
+		case "--stdin":
+			useStdin = true
+		default:
+			if strings.HasPrefix(args[i], "-") {
+				return appMode{}, fmt.Errorf("unknown argument: %s", args[i])
+			}
+			if entryArg != "" {
+				return appMode{}, fmt.Errorf("expected a single entry path or --eval source")
+			}
+			entryArg = args[i]
+		}
 	}
 
-	entryPath, err := filepath.Abs(args[0])
+	if inlineCode != "" {
+		if entryArg != "" || useStdin {
+			return appMode{}, fmt.Errorf("cannot use an entry path or --stdin together with --eval")
+		}
+		cwd, err := os.Getwd()
+		if err != nil {
+			return appMode{}, err
+		}
+		return appMode{
+			inlineSource:  inlineCode,
+			inlineExt:     inlineExt,
+			inlineBaseDir: cwd,
+			title:         "esbuild -> webview (inline)",
+		}, nil
+	}
+
+	if useStdin || (entryArg == "" && stdinHasData()) {
+		if entryArg != "" {
+			return appMode{}, fmt.Errorf("cannot use an entry path together with --stdin")
+		}
+		if useStdin && !stdinHasData() {
+			return appMode{}, fmt.Errorf("--stdin requires piped input")
+		}
+		sourceBytes, err := readAllStdin()
+		if err != nil {
+			return appMode{}, err
+		}
+		if strings.TrimSpace(string(sourceBytes)) == "" {
+			return appMode{}, fmt.Errorf("stdin did not contain any source code")
+		}
+		cwd, err := os.Getwd()
+		if err != nil {
+			return appMode{}, err
+		}
+		return appMode{
+			inlineSource:  string(sourceBytes),
+			inlineExt:     inlineExt,
+			inlineBaseDir: cwd,
+			title:         "esbuild -> webview (stdin)",
+		}, nil
+	}
+
+	if entryArg == "" {
+		return mode, nil
+	}
+	if loaderExplicit {
+		return appMode{}, fmt.Errorf("--loader is only valid with --eval or --stdin")
+	}
+
+	entryPath, err := filepath.Abs(entryArg)
 	if err != nil {
 		return appMode{}, err
 	}
@@ -289,6 +380,33 @@ func detectAppMode(appRoot string, args []string) (appMode, error) {
 		title:     fmt.Sprintf("esbuild -> webview (%s)", filepath.Base(entryPath)),
 		watchDir:  filepath.Dir(entryPath),
 	}, nil
+}
+
+func stdinHasData() bool {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice == 0
+}
+
+func readAllStdin() ([]byte, error) {
+	return io.ReadAll(os.Stdin)
+}
+
+func normalizeInlineExt(loader string) (string, error) {
+	switch strings.ToLower(loader) {
+	case "js", ".js":
+		return ".js", nil
+	case "jsx", ".jsx":
+		return ".jsx", nil
+	case "ts", ".ts":
+		return ".ts", nil
+	case "tsx", ".tsx":
+		return ".tsx", nil
+	default:
+		return "", fmt.Errorf("unsupported loader %q (expected js, jsx, ts, or tsx)", loader)
+	}
 }
 
 func buildHTML(appRoot string, mode appMode) (string, error) {
@@ -315,7 +433,7 @@ func buildHostLoaderHTML(appRoot string) (string, error) {
 
 func buildAppBundle(appRoot string, mode appMode) (string, error) {
 	var jsBundle string
-	if mode.entryPath == "" {
+	if mode.entryPath == "" && mode.inlineSource == "" {
 		jsSrc, cssSrc, err := loadDefaultSources(appRoot)
 		if err != nil {
 			return "", err
@@ -324,9 +442,15 @@ func buildAppBundle(appRoot string, mode appMode) (string, error) {
 		if err != nil {
 			return "", err
 		}
-	} else {
+	} else if mode.entryPath != "" {
 		var err error
 		jsBundle, err = bundleExternalEntry(appRoot, mode.entryPath)
+		if err != nil {
+			return "", err
+		}
+	} else {
+		var err error
+		jsBundle, err = bundleInlineEntry(appRoot, mode)
 		if err != nil {
 			return "", err
 		}
@@ -446,28 +570,7 @@ func bundleDefaultEntry(appRoot, srcJS, srcCSS string) (string, error) {
 func bundleExternalEntry(appRoot, entryPath string) (string, error) {
 	entryDir := filepath.Dir(entryPath)
 	entryFile := "./" + filepath.Base(entryPath)
-	wrapper := fmt.Sprintf(
-		`import { createRoot } from "react-dom/client";
-import { __codexBootstrap } from "codex-react-persist";
-import App from %q;
-
-const host = window;
-const container = document.getElementById("app");
-if (!container) {
-  throw new Error("Missing #app root");
-}
-
-__codexBootstrap().finally(() => {
-  if (host.__codexReactRoot) {
-    try {
-      host.__codexReactRoot.unmount();
-    } catch {}
-  }
-
-  host.__codexReactRoot = createRoot(container);
-  host.__codexReactRoot.render(<App />);
-});
-`, entryFile)
+	wrapper := makeExternalEntryWrapper(entryFile)
 
 	result := api.Build(api.BuildOptions{
 		LogLevel: api.LogLevelSilent,
@@ -528,6 +631,121 @@ __codexBootstrap().finally(() => {
 		return "", fmt.Errorf("esbuild: no JS output (check loaders/entry)")
 	}
 	return outJS, nil
+}
+
+func bundleInlineEntry(appRoot string, mode appMode) (string, error) {
+	entryDir := mode.inlineBaseDir
+	entryFile := "codex-inline-entry"
+	wrapper := makeExternalEntryWrapper(entryFile)
+	inlinePath := filepath.Join(entryDir, "__codex_inline__"+mode.inlineExt)
+
+	result := api.Build(api.BuildOptions{
+		LogLevel: api.LogLevelSilent,
+		Bundle:   true,
+		Write:    false,
+		Outfile:  "app.js",
+		Platform: api.PlatformBrowser,
+		Target:   api.ES2020,
+
+		AbsWorkingDir: appRoot,
+		NodePaths:     []string{filepath.Join(appRoot, "node_modules")},
+		Stdin: &api.StdinOptions{
+			Contents:   wrapper,
+			Sourcefile: filepath.Join(entryDir, "__codex_entry__.jsx"),
+			ResolveDir: entryDir,
+			Loader:     api.LoaderJSX,
+		},
+
+		Loader: map[string]api.Loader{
+			".js":   api.LoaderJSX,
+			".jsx":  api.LoaderJSX,
+			".ts":   api.LoaderTS,
+			".tsx":  api.LoaderTSX,
+			".css":  api.LoaderText,
+			".json": api.LoaderJSON,
+		},
+
+		Define: map[string]string{
+			"process.env.NODE_ENV": `"development"`,
+			"global":               "window",
+		},
+
+		JSX:             api.JSXAutomatic,
+		JSXImportSource: "react",
+
+		MinifyWhitespace:  false,
+		MinifyIdentifiers: false,
+		MinifySyntax:      false,
+		Charset:           api.CharsetUTF8,
+
+		Plugins: []api.Plugin{
+			makeInlineSourcePlugin(mode.inlineSource, inlinePath),
+			makeReactPersistPlugin(appRoot, entryDir),
+		},
+	})
+	if len(result.Errors) > 0 {
+		return "", fmt.Errorf("esbuild: %s", result.Errors[0].Text)
+	}
+
+	var outJS string
+	for _, f := range result.OutputFiles {
+		if strings.HasSuffix(f.Path, ".js") {
+			outJS = string(f.Contents)
+			break
+		}
+	}
+	if outJS == "" {
+		return "", fmt.Errorf("esbuild: no JS output (check loaders/entry)")
+	}
+	return outJS, nil
+}
+
+func makeExternalEntryWrapper(entryFile string) string {
+	return fmt.Sprintf(
+		`import { createRoot } from "react-dom/client";
+import { __codexBootstrap } from "codex-react-persist";
+import App from %q;
+
+const host = window;
+const container = document.getElementById("app");
+if (!container) {
+  throw new Error("Missing #app root");
+}
+
+__codexBootstrap().finally(() => {
+  if (host.__codexReactRoot) {
+    try {
+      host.__codexReactRoot.unmount();
+    } catch {}
+  }
+
+  host.__codexReactRoot = createRoot(container);
+  host.__codexReactRoot.render(<App />);
+});
+`, entryFile)
+}
+
+func makeInlineSourcePlugin(source, sourcePath string) api.Plugin {
+	return api.Plugin{
+		Name: "codex-inline-source",
+		Setup: func(p api.PluginBuild) {
+			p.OnResolve(api.OnResolveOptions{Filter: `^codex-inline-entry$`},
+				func(args api.OnResolveArgs) (api.OnResolveResult, error) {
+					return api.OnResolveResult{Path: sourcePath, Namespace: "codex-inline-source"}, nil
+				},
+			)
+
+			p.OnLoad(api.OnLoadOptions{Filter: `.*`, Namespace: "codex-inline-source"},
+				func(args api.OnLoadArgs) (api.OnLoadResult, error) {
+					return api.OnLoadResult{
+						Contents:   &source,
+						Loader:     loaderForScriptPath(args.Path),
+						ResolveDir: filepath.Dir(args.Path),
+					}, nil
+				},
+			)
+		},
+	}
 }
 
 func makeReactPersistPlugin(appRoot, entryDir string) api.Plugin {

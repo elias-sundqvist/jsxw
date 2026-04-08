@@ -12,3 +12,4 @@ debug-bundle.js
 *.pfx
 dist/
 release/
+*.tgz
