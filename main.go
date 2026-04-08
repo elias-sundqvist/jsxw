@@ -316,6 +316,7 @@ func detectAppMode(appRoot string, args []string) (appMode, error) {
 		if err != nil {
 			return appMode{}, err
 		}
+		inlineCode = normalizeInlineSource(inlineCode)
 		return appMode{
 			inlineSource:  inlineCode,
 			inlineExt:     inlineExt,
@@ -342,8 +343,9 @@ func detectAppMode(appRoot string, args []string) (appMode, error) {
 		if err != nil {
 			return appMode{}, err
 		}
+		inlineSource := normalizeInlineSource(string(sourceBytes))
 		return appMode{
-			inlineSource:  string(sourceBytes),
+			inlineSource:  inlineSource,
 			inlineExt:     inlineExt,
 			inlineBaseDir: cwd,
 			title:         "esbuild -> webview (stdin)",
@@ -407,6 +409,20 @@ func normalizeInlineExt(loader string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported loader %q (expected js, jsx, ts, or tsx)", loader)
 	}
+}
+
+func normalizeInlineSource(source string) string {
+	trimmed := strings.TrimSpace(source)
+	if trimmed == "" {
+		return source
+	}
+	if strings.Contains(trimmed, "export default") {
+		return source
+	}
+	if strings.HasPrefix(trimmed, "<") || strings.HasPrefix(trimmed, "(") {
+		return "export default function App() {\n  return (\n" + source + "\n  );\n}\n"
+	}
+	return source
 }
 
 func buildHTML(appRoot string, mode appMode) (string, error) {

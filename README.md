@@ -21,8 +21,10 @@ npm i -g jsx-window
 jsxx .\app.jsx
 jsxx .\app.tsx
 jsxx C:\path\to\widget.ts
+jsxx --eval "<h1>Hello</h1>"
 jsxx --eval "export default function App() { return <div>Hello</div> }"
 jsxx --eval "export default function App() { return <div>Hello</div> }" --loader jsx
+"<h1>Hello</h1>" | jsxx --loader jsx
 "export default function App() { return <div>Hello</div> }" | jsxx
 "export default function App() { return <div>Hello</div> }" | jsxx --loader jsx
 ```
@@ -64,6 +66,7 @@ export default function App() {
 - Relative imports work for `.js`, `.jsx`, `.ts`, `.tsx`, and `.json`
 - The file is transpiled with esbuild, so TypeScript syntax is fine, but full `tsc` type-checking is not run
 - Inline mode is available through `--eval` / `-e`; it uses the current working directory as the base for relative imports
+- For `--eval` and stdin, a bare JSX expression like `<h1>Hello</h1>` is automatically wrapped into a default component
 - Piped stdin is also supported; it is treated like inline source and also resolves relative imports from the current working directory
 
 ### Current Limitations

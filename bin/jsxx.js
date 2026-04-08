@@ -20,8 +20,10 @@ if (!fs.existsSync(exePath)) {
 
 if (args.includes("--help") || args.includes("-h")) {
   console.log(`jsxx <entry-file>
+jsxx --eval "<h1>Hello</h1>"
 jsxx --eval "export default function App() { return <div>Hello</div> }"
 jsxx --eval "export default function App() { return <div>Hello</div> }" --loader tsx
+echo "<h1>Hello</h1>" | jsxx --loader jsx
 echo "export default function App() { return <div>Hello</div> }" | jsxx
 jsxx --register
 jsxx --register --set-default-association
