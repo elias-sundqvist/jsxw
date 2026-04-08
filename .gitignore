@@ -2,3 +2,13 @@ node_modules/
 *.exe
 *.exe~
 debug-bundle.js
+.env
+.env.*
+!.env.example
+.npmrc
+*.pem
+*.key
+*.p12
+*.pfx
+dist/
+release/
