@@ -10,7 +10,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/evanw/esbuild/pkg/api"
 	"github.com/fsnotify/fsnotify"
@@ -105,6 +108,27 @@ type appMode struct {
 	watchDir  string
 }
 
+type appBundleStore struct {
+	mu   sync.RWMutex
+	data string
+}
+
+func newAppBundleStore(data string) *appBundleStore {
+	return &appBundleStore{data: data}
+}
+
+func (s *appBundleStore) get() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.data
+}
+
+func (s *appBundleStore) set(data string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data = data
+}
+
 func main() {
 	// macOS webviews prefer main thread
 	if runtime.GOOS == "darwin" {
@@ -121,9 +145,25 @@ func main() {
 		log.Fatal(err)
 	}
 
-	finalHTML, err := buildHTML(appRoot, mode)
-	if err != nil {
-		log.Fatal(err)
+	var (
+		finalHTML   string
+		bundleStore *appBundleStore
+	)
+	if mode.entryPath != "" {
+		initialBundle, err := buildAppBundle(appRoot, mode)
+		if err != nil {
+			log.Fatal(err)
+		}
+		bundleStore = newAppBundleStore(initialBundle)
+		finalHTML, err = buildHostLoaderHTML(appRoot)
+		if err != nil {
+			log.Fatal(err)
+		}
+	} else {
+		finalHTML, err = buildHTML(appRoot, mode)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	// Serve to webview via data: URL (no server, no temp files)
@@ -136,6 +176,11 @@ func main() {
 	reloadState := newReloadStateStore()
 	if err := initReloadStateBridge(w, reloadState); err != nil {
 		log.Println("reload state:", err)
+	}
+	if bundleStore != nil {
+		if err := initAppBundleBridge(w, bundleStore); err != nil {
+			log.Println("app bundle:", err)
+		}
 	}
 	if err := initWindowChrome(w); err != nil {
 		log.Println("window chrome:", err)
@@ -151,9 +196,10 @@ func main() {
 					log.Println("reload bundle:", err)
 					return
 				}
+				bundleStore.set(bundle)
 
 				w.Dispatch(func() {
-					w.Eval(bundle)
+					w.Eval(`window.__codexReloadFromHost && window.__codexReloadFromHost()`)
 				})
 				return
 			}
@@ -259,6 +305,14 @@ func buildHTML(appRoot string, mode appMode) (string, error) {
 	return injectJS(idx, jsBundle), nil
 }
 
+func buildHostLoaderHTML(appRoot string) (string, error) {
+	idx, err := loadIndexHTML(appRoot)
+	if err != nil {
+		return "", err
+	}
+	return injectJS(idx, hostBundleLoaderJS), nil
+}
+
 func buildAppBundle(appRoot string, mode appMode) (string, error) {
 	var jsBundle string
 	if mode.entryPath == "" {
@@ -348,6 +402,7 @@ func bundleDefaultEntry(appRoot, srcJS, srcCSS string) (string, error) {
 
 		MinifyWhitespace:  true,
 		MinifyIdentifiers: true,
+		Charset:           api.CharsetUTF8,
 
 		Plugins: []api.Plugin{
 			{
@@ -451,8 +506,10 @@ __codexBootstrap().finally(() => {
 		MinifyWhitespace:  false,
 		MinifyIdentifiers: false,
 		MinifySyntax:      false,
+		Charset:           api.CharsetUTF8,
 
 		Plugins: []api.Plugin{
+			makeUnicodeSourcePlugin(),
 			makeReactPersistPlugin(appRoot, entryDir),
 		},
 	})
@@ -710,6 +767,105 @@ export default PersistedReact;`
 	}
 }
 
+func makeUnicodeSourcePlugin() api.Plugin {
+	return api.Plugin{
+		Name: "codex-unicode-source",
+		Setup: func(p api.PluginBuild) {
+			p.OnLoad(api.OnLoadOptions{Filter: `\.(js|jsx|ts|tsx)$`},
+				func(args api.OnLoadArgs) (api.OnLoadResult, error) {
+					sourcePath := filepath.ToSlash(args.Path)
+					if strings.Contains(sourcePath, "/node_modules/") {
+						return api.OnLoadResult{}, nil
+					}
+
+					b, err := os.ReadFile(args.Path)
+					if err != nil {
+						return api.OnLoadResult{}, err
+					}
+					contents := decodeUnicodeEscapes(string(b))
+
+					return api.OnLoadResult{
+						Contents:   &contents,
+						Loader:     loaderForScriptPath(args.Path),
+						ResolveDir: filepath.Dir(args.Path),
+					}, nil
+				},
+			)
+		},
+	}
+}
+
+func loaderForScriptPath(path string) api.Loader {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".ts":
+		return api.LoaderTS
+	case ".tsx":
+		return api.LoaderTSX
+	case ".jsx":
+		return api.LoaderJSX
+	default:
+		return api.LoaderJS
+	}
+}
+
+func decodeUnicodeEscapes(input string) string {
+	var out strings.Builder
+	out.Grow(len(input))
+
+	for i := 0; i < len(input); {
+		if input[i] == '\\' && i+5 < len(input) && input[i+1] == 'u' {
+			unit, ok := parseHexUint16(input[i+2 : i+6])
+			if ok {
+				if utf16.IsSurrogate(rune(unit)) && i+11 < len(input) && input[i+6] == '\\' && input[i+7] == 'u' {
+					nextUnit, nextOK := parseHexUint16(input[i+8 : i+12])
+					if nextOK {
+						decoded := utf16.DecodeRune(rune(unit), rune(nextUnit))
+						if decoded != unicodeReplacementRune {
+							out.WriteRune(decoded)
+							i += 12
+							continue
+						}
+					}
+				}
+
+				out.WriteRune(rune(unit))
+				i += 6
+				continue
+			}
+		}
+
+		r, size := utf8.DecodeRuneInString(input[i:])
+		out.WriteRune(r)
+		i += size
+	}
+
+	return out.String()
+}
+
+const unicodeReplacementRune = '\uFFFD'
+
+func parseHexUint16(s string) (uint16, bool) {
+	if len(s) != 4 {
+		return 0, false
+	}
+
+	var value uint16
+	for _, ch := range s {
+		value <<= 4
+		switch {
+		case ch >= '0' && ch <= '9':
+			value |= uint16(ch - '0')
+		case ch >= 'a' && ch <= 'f':
+			value |= uint16(ch-'a') + 10
+		case ch >= 'A' && ch <= 'F':
+			value |= uint16(ch-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return value, true
+}
+
 func injectJS(html, js string) string {
 	const marker = "<!--JS-->"
 	tag := `<script type="module">` + js + `</script>`
@@ -719,6 +875,55 @@ func injectJS(html, js string) string {
 	// Fallback: append before </body>
 	return strings.Replace(html, "</body>", tag+"</body>", 1)
 }
+
+func initAppBundleBridge(w webview_selector.WebView, store *appBundleStore) error {
+	return w.Bind("__codexGetAppBundle", func() string {
+		return store.get()
+	})
+}
+
+const hostBundleLoaderJS = `(() => {
+  let loadToken = 0;
+
+  async function loadBundleFromHost() {
+    const token = ++loadToken;
+
+    if (typeof window.__codexFlushReloadState === "function") {
+      try {
+        await window.__codexFlushReloadState();
+      } catch {}
+    }
+
+    if (typeof window.__codexGetAppBundle !== "function") {
+      return;
+    }
+
+    const bundle = await window.__codexGetAppBundle();
+    if (token !== loadToken || !bundle) {
+      return;
+    }
+
+    try {
+      (0, eval)(bundle);
+    } catch (error) {
+      console.error("Failed to evaluate host bundle", error);
+    }
+  }
+
+  window.__codexReloadFromHost = loadBundleFromHost;
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => {
+      loadBundleFromHost().catch((error) => {
+        console.error("Failed to load host bundle", error);
+      });
+    }, { once: true });
+  } else {
+    loadBundleFromHost().catch((error) => {
+      console.error("Failed to load host bundle", error);
+    });
+  }
+})();`
 
 // watchAndReload watches a directory and triggers cb on debounced changes to .js/.css/.html.
 func watchAndReload(dir string, cb func()) error {
