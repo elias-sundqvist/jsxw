@@ -10,6 +10,12 @@ It packages a small Go + WebView2 host that transpiles your entry file with esbu
 npm i -g jsx-window
 ```
 
+Or run it without a global install:
+
+```powershell
+bunx jsx-window .\app.jsx
+```
+
 ## Requirements
 
 - Windows 11 or Windows 10 with the Microsoft Edge WebView2 runtime installed
@@ -27,6 +33,8 @@ jsxx --eval "export default function App() { return <div>Hello</div> }" --loader
 "<h1>Hello</h1>" | jsxx --loader jsx
 "export default function App() { return <div>Hello</div> }" | jsxx
 "export default function App() { return <div>Hello</div> }" | jsxx --loader jsx
+bunx jsx-window .\app.jsx
+bunx jsx-window --eval "<h1>Hello</h1>"
 ```
 
 ## What The Entry File Should Look Like

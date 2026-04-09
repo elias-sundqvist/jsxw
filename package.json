@@ -1,10 +1,11 @@
 {
   "name": "jsx-window",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Run JSX and TSX files as native desktop windows on Windows.",
   "main": "bin/jsxx.js",
   "bin": {
-    "jsxx": "bin/jsxx.js"
+    "jsxx": "bin/jsxx.js",
+    "jsx-window": "bin/jsxx.js"
   },
   "scripts": {
     "build:exe": "powershell -ExecutionPolicy Bypass -File ./scripts/build-jsx-window.ps1",
