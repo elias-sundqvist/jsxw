@@ -30,11 +30,14 @@ jsxx C:\path\to\widget.ts
 jsxx --eval "<h1>Hello</h1>"
 jsxx --eval "export default function App() { return <div>Hello</div> }"
 jsxx --eval "export default function App() { return <div>Hello</div> }" --loader jsx
+jsxx --serve .\app.jsx
+jsxx --serve --port 3000 .\app.jsx
 "<h1>Hello</h1>" | jsxx --loader jsx
 "export default function App() { return <div>Hello</div> }" | jsxx
 "export default function App() { return <div>Hello</div> }" | jsxx --loader jsx
 bunx jsx-window .\app.jsx
 bunx jsx-window --eval "<h1>Hello</h1>"
+bunx jsx-window --serve .\app.jsx
 ```
 
 ## What The Entry File Should Look Like
@@ -76,6 +79,8 @@ export default function App() {
 - Inline mode is available through `--eval` / `-e`; it uses the current working directory as the base for relative imports
 - For `--eval` and stdin, a bare JSX expression like `<h1>Hello</h1>` is automatically wrapped into a default component
 - Piped stdin is also supported; it is treated like inline source and also resolves relative imports from the current working directory
+- `--serve` starts a local HTTP server instead of opening a desktop window and prints the URL to stdout
+- `--port` and `--host` can be used with `--serve`; by default it serves on `127.0.0.1` and picks an available port
 
 ### Current Limitations
 
@@ -83,6 +88,7 @@ export default function App() {
 - The entry is treated as a React app root, so a plain script file with side effects but no exported component is not the intended shape
 - Inline mode is not file-watched, since there is no source file to reload from
 - Stdin mode is also not file-watched
+- `--serve` hot-reloads by fetching the newest bundle into the page; it does not preserve React state the way the desktop host can
 
 ## Host Integration
 

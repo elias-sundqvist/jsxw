@@ -23,6 +23,8 @@ if (args.includes("--help") || args.includes("-h")) {
 jsxx --eval "<h1>Hello</h1>"
 jsxx --eval "export default function App() { return <div>Hello</div> }"
 jsxx --eval "export default function App() { return <div>Hello</div> }" --loader tsx
+jsxx --serve .\\app.jsx
+jsxx --serve --port 3000 .\\app.jsx
 echo "<h1>Hello</h1>" | jsxx --loader jsx
 echo "export default function App() { return <div>Hello</div> }" | jsxx
 jsxx --register

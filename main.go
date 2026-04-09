@@ -7,9 +7,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -104,12 +108,19 @@ var mainJS string
 var styleCSS string
 
 type appMode struct {
-	entryPath      string
-	inlineSource   string
-	inlineExt      string
-	inlineBaseDir  string
-	title          string
-	watchDir       string
+	entryPath       string
+	inlineSource    string
+	inlineExt       string
+	inlineBaseDir   string
+	title           string
+	watchDir        string
+	showHelp        bool
+	showVersion     bool
+	register        bool
+	setDefaultAssoc bool
+	serve           bool
+	serveHost       string
+	servePort       int
 }
 
 type appBundleStore struct {
@@ -147,6 +158,26 @@ func main() {
 	mode, err := detectAppMode(appRoot, os.Args[1:])
 	if err != nil {
 		log.Fatal(err)
+	}
+	if mode.showHelp {
+		fmt.Print(cliUsage())
+		return
+	}
+	if mode.showVersion {
+		fmt.Println(resolveVersion(appRoot))
+		return
+	}
+	if mode.register {
+		if err := runRegistration(appRoot, mode.setDefaultAssoc); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if mode.serve {
+		if err := runServeMode(appRoot, mode); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 
 	var (
@@ -265,8 +296,9 @@ func hasProjectAssets(root string) bool {
 
 func detectAppMode(appRoot string, args []string) (appMode, error) {
 	mode := appMode{
-		title:    "esbuild -> webview (no server)",
-		watchDir: filepath.Join(appRoot, "web"),
+		title:     "esbuild -> webview (no server)",
+		watchDir:  filepath.Join(appRoot, "web"),
+		serveHost: "127.0.0.1",
 	}
 	var (
 		entryArg       string
@@ -274,10 +306,40 @@ func detectAppMode(appRoot string, args []string) (appMode, error) {
 		inlineExt      = ".jsx"
 		loaderExplicit bool
 		useStdin       bool
+		portExplicit   bool
+		hostExplicit   bool
 	)
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "-h", "--help":
+			mode.showHelp = true
+		case "-v", "--version":
+			mode.showVersion = true
+		case "--register":
+			mode.register = true
+		case "--set-default-association":
+			mode.setDefaultAssoc = true
+		case "--serve":
+			mode.serve = true
+		case "--host":
+			if i+1 >= len(args) {
+				return appMode{}, fmt.Errorf("--host requires a hostname or IP address")
+			}
+			mode.serveHost = args[i+1]
+			hostExplicit = true
+			i++
+		case "--port":
+			if i+1 >= len(args) {
+				return appMode{}, fmt.Errorf("--port requires a numeric value")
+			}
+			port, err := strconv.Atoi(args[i+1])
+			if err != nil || port < 0 || port > 65535 {
+				return appMode{}, fmt.Errorf("invalid port %q", args[i+1])
+			}
+			mode.servePort = port
+			portExplicit = true
+			i++
 		case "-e", "--eval":
 			if i+1 >= len(args) {
 				return appMode{}, fmt.Errorf("%s requires an inline source string", args[i])
@@ -308,6 +370,22 @@ func detectAppMode(appRoot string, args []string) (appMode, error) {
 		}
 	}
 
+	if mode.showHelp || mode.showVersion || mode.register {
+		if entryArg != "" || inlineCode != "" || useStdin || loaderExplicit || mode.serve || portExplicit || hostExplicit {
+			return appMode{}, fmt.Errorf("cannot combine %s with entry, eval, stdin, or loader flags", firstMetaFlag(mode))
+		}
+		if mode.setDefaultAssoc && !mode.register {
+			return appMode{}, fmt.Errorf("--set-default-association requires --register")
+		}
+		return mode, nil
+	}
+	if mode.setDefaultAssoc {
+		return appMode{}, fmt.Errorf("--set-default-association requires --register")
+	}
+	if (portExplicit || hostExplicit) && !mode.serve {
+		return appMode{}, fmt.Errorf("--host and --port are only valid with --serve")
+	}
+
 	if inlineCode != "" {
 		if entryArg != "" || useStdin {
 			return appMode{}, fmt.Errorf("cannot use an entry path or --stdin together with --eval")
@@ -322,6 +400,9 @@ func detectAppMode(appRoot string, args []string) (appMode, error) {
 			inlineExt:     inlineExt,
 			inlineBaseDir: cwd,
 			title:         "esbuild -> webview (inline)",
+			serve:         mode.serve,
+			serveHost:     mode.serveHost,
+			servePort:     mode.servePort,
 		}, nil
 	}
 
@@ -349,6 +430,9 @@ func detectAppMode(appRoot string, args []string) (appMode, error) {
 			inlineExt:     inlineExt,
 			inlineBaseDir: cwd,
 			title:         "esbuild -> webview (stdin)",
+			serve:         mode.serve,
+			serveHost:     mode.serveHost,
+			servePort:     mode.servePort,
 		}, nil
 	}
 
@@ -381,7 +465,72 @@ func detectAppMode(appRoot string, args []string) (appMode, error) {
 		entryPath: entryPath,
 		title:     fmt.Sprintf("esbuild -> webview (%s)", filepath.Base(entryPath)),
 		watchDir:  filepath.Dir(entryPath),
+		serve:     mode.serve,
+		serveHost: mode.serveHost,
+		servePort: mode.servePort,
 	}, nil
+}
+
+func firstMetaFlag(mode appMode) string {
+	switch {
+	case mode.showHelp:
+		return "--help"
+	case mode.showVersion:
+		return "--version"
+	case mode.register:
+		return "--register"
+	default:
+		return "flag"
+	}
+}
+
+func cliUsage() string {
+	return `jsxx <entry-file>
+jsxx --eval "<h1>Hello</h1>"
+jsxx --eval "export default function App() { return <div>Hello</div> }"
+jsxx --eval "export default function App() { return <div>Hello</div> }" --loader tsx
+jsxx --serve .\app.jsx
+jsxx --serve --port 3000 .\app.jsx
+echo "<h1>Hello</h1>" | jsxx --loader jsx
+echo "export default function App() { return <div>Hello</div> }" | jsxx
+jsxx --register
+jsxx --register --set-default-association
+jsxx --version
+`
+}
+
+func resolveVersion(appRoot string) string {
+	packagePath := filepath.Join(appRoot, "package.json")
+	data, err := os.ReadFile(packagePath)
+	if err != nil {
+		return "dev"
+	}
+	var pkg struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil || pkg.Version == "" {
+		return "dev"
+	}
+	return pkg.Version
+}
+
+func runRegistration(appRoot string, setDefaultAssoc bool) error {
+	scriptPath := filepath.Join(appRoot, "scripts", "register-jsx-window.ps1")
+	if _, err := os.Stat(scriptPath); err != nil {
+		return fmt.Errorf("registration script not found: %s", scriptPath)
+	}
+	args := []string{
+		"-ExecutionPolicy", "Bypass",
+		"-File", scriptPath,
+	}
+	if setDefaultAssoc {
+		args = append(args, "-SetDefaultAssociation")
+	}
+	cmd := exec.Command("powershell", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	return cmd.Run()
 }
 
 func stdinHasData() bool {
@@ -445,6 +594,14 @@ func buildHostLoaderHTML(appRoot string) (string, error) {
 		return "", err
 	}
 	return injectJS(idx, hostBundleLoaderJS), nil
+}
+
+func buildServeLoaderHTML(appRoot string) (string, error) {
+	idx, err := loadIndexHTML(appRoot)
+	if err != nil {
+		return "", err
+	}
+	return injectJS(idx, serveBundleLoaderJS), nil
 }
 
 func buildAppBundle(appRoot string, mode appMode) (string, error) {
@@ -1158,6 +1315,200 @@ const hostBundleLoaderJS = `(() => {
     });
   }
 })();`
+
+const serveBundleLoaderJS = `(() => {
+  let loadToken = 0;
+
+  async function loadBundleFromHost() {
+    const token = ++loadToken;
+    const response = await fetch("/__jsxw/bundle.js?ts=" + Date.now(), {
+      cache: "no-store",
+      credentials: "same-origin",
+    });
+    if (!response.ok) {
+      throw new Error("Failed to fetch bundle: " + response.status);
+    }
+
+    const bundle = await response.text();
+    if (token !== loadToken || !bundle) {
+      return;
+    }
+
+    try {
+      (0, eval)(bundle);
+    } catch (error) {
+      console.error("Failed to evaluate served bundle", error);
+    }
+  }
+
+  window.__codexReloadFromHost = loadBundleFromHost;
+
+  if (typeof EventSource === "function") {
+    const events = new EventSource("/__jsxw/events");
+    events.onmessage = () => {
+      loadBundleFromHost().catch((error) => {
+        console.error("Failed to reload served bundle", error);
+      });
+    };
+    events.onerror = () => {};
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => {
+      loadBundleFromHost().catch((error) => {
+        console.error("Failed to load served bundle", error);
+      });
+    }, { once: true });
+  } else {
+    loadBundleFromHost().catch((error) => {
+      console.error("Failed to load served bundle", error);
+    });
+  }
+})();`
+
+type serveReloadBroker struct {
+	mu        sync.Mutex
+	listeners map[chan struct{}]struct{}
+}
+
+func newServeReloadBroker() *serveReloadBroker {
+	return &serveReloadBroker{
+		listeners: make(map[chan struct{}]struct{}),
+	}
+}
+
+func (b *serveReloadBroker) subscribe() chan struct{} {
+	ch := make(chan struct{}, 1)
+	b.mu.Lock()
+	b.listeners[ch] = struct{}{}
+	b.mu.Unlock()
+	return ch
+}
+
+func (b *serveReloadBroker) unsubscribe(ch chan struct{}) {
+	b.mu.Lock()
+	if _, ok := b.listeners[ch]; ok {
+		delete(b.listeners, ch)
+		close(ch)
+	}
+	b.mu.Unlock()
+}
+
+func (b *serveReloadBroker) notify() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for ch := range b.listeners {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func runServeMode(appRoot string, mode appMode) error {
+	debugServef("serve: building initial bundle")
+	initialBundle, err := buildAppBundle(appRoot, mode)
+	if err != nil {
+		return err
+	}
+	debugServef("serve: building loader html")
+	indexHTML, err := buildServeLoaderHTML(appRoot)
+	if err != nil {
+		return err
+	}
+
+	bundleStore := newAppBundleStore(initialBundle)
+	reloads := newServeReloadBroker()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = io.WriteString(w, indexHTML)
+	})
+	mux.HandleFunc("/__jsxw/bundle.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = io.WriteString(w, bundleStore.get())
+	})
+	mux.HandleFunc("/__jsxw/events", func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Connection", "keep-alive")
+
+		ch := reloads.subscribe()
+		defer reloads.unsubscribe(ch)
+
+		_, _ = io.WriteString(w, ": connected\n\n")
+		flusher.Flush()
+
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ch:
+				_, _ = io.WriteString(w, "data: reload\n\n")
+				flusher.Flush()
+			}
+		}
+	})
+
+	debugServef("serve: creating listener on %s:%d", mode.serveHost, mode.servePort)
+	listener, err := net.Listen("tcp", net.JoinHostPort(mode.serveHost, strconv.Itoa(mode.servePort)))
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	debugServef("serve: listener ready on %s", listener.Addr().String())
+
+	if mode.watchDir != "" {
+		go func() {
+			if err := watchAndReload(mode.watchDir, func() {
+				bundle, err := buildAppBundle(appRoot, mode)
+				if err != nil {
+					log.Println("reload bundle:", err)
+					return
+				}
+				bundleStore.set(bundle)
+				reloads.notify()
+			}); err != nil {
+				log.Println("watch:", err)
+			}
+		}()
+	}
+
+	url := "http://" + listener.Addr().String()
+	fmt.Println(url)
+	log.Printf("Serving %s", url)
+
+	server := &http.Server{Handler: mux}
+	return server.Serve(listener)
+}
+
+func debugServef(format string, args ...any) {
+	if os.Getenv("JSXX_DEBUG_SERVE") == "" {
+		return
+	}
+	message := fmt.Sprintf(format, args...)
+	log.Println(message)
+	logPath := filepath.Join(os.TempDir(), "jsxx-serve-debug.log")
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = fmt.Fprintf(f, "%s %s\n", time.Now().Format(time.RFC3339Nano), message)
+}
 
 // watchAndReload watches a directory and triggers cb on debounced changes to .js/.css/.html.
 func watchAndReload(dir string, cb func()) error {
