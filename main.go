@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -112,6 +114,7 @@ type appMode struct {
 	inlineSource    string
 	inlineExt       string
 	inlineBaseDir   string
+	contentRoot     string
 	title           string
 	watchDir        string
 	showHelp        bool
@@ -183,6 +186,7 @@ func main() {
 	var (
 		finalHTML   string
 		bundleStore *appBundleStore
+		windowHost  *windowContentHost
 	)
 	if mode.entryPath != "" {
 		initialBundle, err := buildAppBundle(appRoot, mode)
@@ -190,7 +194,7 @@ func main() {
 			log.Fatal(err)
 		}
 		bundleStore = newAppBundleStore(initialBundle)
-		finalHTML, err = buildHostLoaderHTML(appRoot)
+		finalHTML, err = buildWindowLoaderHTML(appRoot)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -212,15 +216,21 @@ func main() {
 	if err := initReloadStateBridge(w, reloadState); err != nil {
 		log.Println("reload state:", err)
 	}
+	navigateURL := dataURL
 	if bundleStore != nil {
-		if err := initAppBundleBridge(w, bundleStore); err != nil {
-			log.Println("app bundle:", err)
+		if mode.entryPath != "" {
+			windowHost, err = initWindowContentHost(w, mode, finalHTML, bundleStore.get())
+			if err != nil {
+				log.Println("window content host:", err)
+			} else {
+				navigateURL = windowHost.navigateURL
+			}
 		}
 	}
 	if err := initWindowChrome(w); err != nil {
 		log.Println("window chrome:", err)
 	}
-	w.Navigate(dataURL)
+	w.Navigate(navigateURL)
 
 	if mode.watchDir != "" {
 		// Always watch files and live-reload the page when something changes
@@ -233,6 +243,12 @@ func main() {
 						return
 					}
 					bundleStore.set(bundle)
+					if windowHost != nil {
+						if err := windowHost.updateBundle(bundle); err != nil {
+							log.Println("reload host bundle:", err)
+							return
+						}
+					}
 
 					w.Dispatch(func() {
 						w.Eval(`window.__codexReloadFromHost && window.__codexReloadFromHost()`)
@@ -399,6 +415,7 @@ func detectAppMode(appRoot string, args []string) (appMode, error) {
 			inlineSource:  inlineCode,
 			inlineExt:     inlineExt,
 			inlineBaseDir: cwd,
+			contentRoot:   cwd,
 			title:         "esbuild -> webview (inline)",
 			serve:         mode.serve,
 			serveHost:     mode.serveHost,
@@ -429,6 +446,7 @@ func detectAppMode(appRoot string, args []string) (appMode, error) {
 			inlineSource:  inlineSource,
 			inlineExt:     inlineExt,
 			inlineBaseDir: cwd,
+			contentRoot:   cwd,
 			title:         "esbuild -> webview (stdin)",
 			serve:         mode.serve,
 			serveHost:     mode.serveHost,
@@ -462,12 +480,13 @@ func detectAppMode(appRoot string, args []string) (appMode, error) {
 	}
 
 	return appMode{
-		entryPath: entryPath,
-		title:     fmt.Sprintf("esbuild -> webview (%s)", filepath.Base(entryPath)),
-		watchDir:  filepath.Dir(entryPath),
-		serve:     mode.serve,
-		serveHost: mode.serveHost,
-		servePort: mode.servePort,
+		entryPath:   entryPath,
+		contentRoot: resolveContentRoot(entryPath),
+		title:       fmt.Sprintf("esbuild -> webview (%s)", filepath.Base(entryPath)),
+		watchDir:    filepath.Dir(entryPath),
+		serve:       mode.serve,
+		serveHost:   mode.serveHost,
+		servePort:   mode.servePort,
 	}, nil
 }
 
@@ -594,6 +613,15 @@ func buildHostLoaderHTML(appRoot string) (string, error) {
 		return "", err
 	}
 	return injectJS(idx, hostBundleLoaderJS), nil
+}
+
+func buildWindowLoaderHTML(appRoot string) (string, error) {
+	idx, err := loadIndexHTML(appRoot)
+	if err != nil {
+		return "", err
+	}
+	idx = injectBaseHref(idx, "https://assets.jsxw.local/")
+	return injectJS(idx, windowBundleLoaderJS), nil
 }
 
 func buildServeLoaderHTML(appRoot string) (string, error) {
@@ -1267,6 +1295,17 @@ func injectJS(html, js string) string {
 	return strings.Replace(html, "</body>", tag+"</body>", 1)
 }
 
+func injectBaseHref(html, href string) string {
+	baseTag := `<base href="` + href + `">`
+	if strings.Contains(strings.ToLower(html), "<base ") {
+		return html
+	}
+	if strings.Contains(html, "<head>") {
+		return strings.Replace(html, "<head>", "<head>\n    "+baseTag, 1)
+	}
+	return html
+}
+
 func initAppBundleBridge(w webview_selector.WebView, store *appBundleStore) error {
 	return w.Bind("__codexGetAppBundle", func() string {
 		return store.get()
@@ -1275,6 +1314,19 @@ func initAppBundleBridge(w webview_selector.WebView, store *appBundleStore) erro
 
 const hostBundleLoaderJS = `(() => {
   let loadToken = 0;
+  let previousBundleURL = null;
+
+  async function executeBundle(bundle) {
+    const bundleURL = URL.createObjectURL(new Blob([bundle], { type: "text/javascript" }));
+    try {
+      await import(bundleURL);
+    } finally {
+      if (previousBundleURL) {
+        URL.revokeObjectURL(previousBundleURL);
+      }
+      previousBundleURL = bundleURL;
+    }
+  }
 
   async function loadBundleFromHost() {
     const token = ++loadToken;
@@ -1295,7 +1347,7 @@ const hostBundleLoaderJS = `(() => {
     }
 
     try {
-      (0, eval)(bundle);
+      await executeBundle(bundle);
     } catch (error) {
       console.error("Failed to evaluate host bundle", error);
     }
@@ -1316,8 +1368,81 @@ const hostBundleLoaderJS = `(() => {
   }
 })();`
 
+const windowBundleLoaderJS = `(() => {
+  let loadToken = 0;
+  let previousBundleURL = null;
+
+  async function executeBundle(bundle) {
+    const bundleURL = URL.createObjectURL(new Blob([bundle], { type: "text/javascript" }));
+    try {
+      await import(bundleURL);
+    } finally {
+      if (previousBundleURL) {
+        URL.revokeObjectURL(previousBundleURL);
+      }
+      previousBundleURL = bundleURL;
+    }
+  }
+
+  async function loadBundleFromHost() {
+    const token = ++loadToken;
+
+    if (typeof window.__codexFlushReloadState === "function") {
+      try {
+        await window.__codexFlushReloadState();
+      } catch {}
+    }
+
+    const response = await fetch("https://app.jsxw.local/__jsxw/bundle.js?ts=" + Date.now(), {
+      cache: "no-store",
+      credentials: "same-origin",
+    });
+    if (!response.ok) {
+      throw new Error("Failed to fetch bundle: " + response.status);
+    }
+
+    const bundle = await response.text();
+    if (token !== loadToken || !bundle) {
+      return;
+    }
+
+    try {
+      await executeBundle(bundle);
+    } catch (error) {
+      console.error("Failed to evaluate window bundle", error);
+    }
+  }
+
+  window.__codexReloadFromHost = loadBundleFromHost;
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => {
+      loadBundleFromHost().catch((error) => {
+        console.error("Failed to load window bundle", error);
+      });
+    }, { once: true });
+  } else {
+    loadBundleFromHost().catch((error) => {
+      console.error("Failed to load window bundle", error);
+    });
+  }
+})();`
+
 const serveBundleLoaderJS = `(() => {
   let loadToken = 0;
+  let previousBundleURL = null;
+
+  async function executeBundle(bundle) {
+    const bundleURL = URL.createObjectURL(new Blob([bundle], { type: "text/javascript" }));
+    try {
+      await import(bundleURL);
+    } finally {
+      if (previousBundleURL) {
+        URL.revokeObjectURL(previousBundleURL);
+      }
+      previousBundleURL = bundleURL;
+    }
+  }
 
   async function loadBundleFromHost() {
     const token = ++loadToken;
@@ -1335,7 +1460,7 @@ const serveBundleLoaderJS = `(() => {
     }
 
     try {
-      (0, eval)(bundle);
+      await executeBundle(bundle);
     } catch (error) {
       console.error("Failed to evaluate served bundle", error);
     }
@@ -1406,6 +1531,7 @@ func (b *serveReloadBroker) notify() {
 }
 
 func runServeMode(appRoot string, mode appMode) error {
+	debugServef("serve: content root %q", mode.contentRoot)
 	debugServef("serve: building initial bundle")
 	initialBundle, err := buildAppBundle(appRoot, mode)
 	if err != nil {
@@ -1422,7 +1548,14 @@ func runServeMode(appRoot string, mode appMode) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/favicon.ico" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if r.URL.Path != "/" {
+			if tryServeStaticAsset(w, r, mode.contentRoot) {
+				return
+			}
 			http.NotFound(w, r)
 			return
 		}
@@ -1493,6 +1626,83 @@ func runServeMode(appRoot string, mode appMode) error {
 
 	server := &http.Server{Handler: mux}
 	return server.Serve(listener)
+}
+
+func resolveContentRoot(entryPath string) string {
+	dir := filepath.Dir(entryPath)
+	for current := dir; ; current = filepath.Dir(current) {
+		if hasContentRootMarker(current) {
+			return current
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+	}
+	if filepath.Base(dir) == "src" {
+		return filepath.Dir(dir)
+	}
+	return dir
+}
+
+func hasContentRootMarker(dir string) bool {
+	for _, name := range []string{".git", "package.json", "node_modules"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func tryServeStaticAsset(w http.ResponseWriter, r *http.Request, root string) bool {
+	fullPath, ok := resolveStaticContentPath(root, r.URL.Path)
+	if !ok {
+		debugServef("serve asset: unresolved path %s (root=%q)", r.URL.Path, root)
+		return false
+	}
+	debugServef("serve asset: serving %s -> %s", r.URL.Path, fullPath)
+	http.ServeFile(w, r, fullPath)
+	return true
+}
+
+func readStaticAsset(root, requestPath string) ([]byte, string, bool) {
+	fullPath, ok := resolveStaticContentPath(root, requestPath)
+	if !ok {
+		return nil, "", false
+	}
+	body, err := os.ReadFile(fullPath)
+	if err != nil {
+		return nil, "", false
+	}
+	return body, contentTypeForPath(fullPath, body), true
+}
+
+func resolveStaticContentPath(root, requestPath string) (string, bool) {
+	if root == "" {
+		return "", false
+	}
+	cleanPath := path.Clean("/" + requestPath)
+	if cleanPath == "/" || strings.HasPrefix(cleanPath, "/__jsxw/") {
+		return "", false
+	}
+	relativePath := strings.TrimPrefix(cleanPath, "/")
+	fullPath := filepath.Join(root, filepath.FromSlash(relativePath))
+	rel, err := filepath.Rel(root, fullPath)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return "", false
+	}
+	info, err := os.Stat(fullPath)
+	if err != nil || info.IsDir() {
+		return "", false
+	}
+	return fullPath, true
+}
+
+func contentTypeForPath(fullPath string, body []byte) string {
+	if extType := mime.TypeByExtension(strings.ToLower(filepath.Ext(fullPath))); extType != "" {
+		return extType
+	}
+	return http.DetectContentType(body)
 }
 
 func debugServef(format string, args ...any) {

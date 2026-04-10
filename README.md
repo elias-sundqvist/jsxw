@@ -75,6 +75,7 @@ export default function App() {
 - Default-export a component: `export default function App() { ... }`
 - React hooks such as `useState` and `useReducer` work, and their state is preserved across hot reloads in common cases
 - Relative imports work for `.js`, `.jsx`, `.ts`, `.tsx`, and `.json`
+- Plain asset paths like `./src/assets/example.png` can be used from JSX in desktop-window mode; they are resolved through an internal fake origin instead of a real localhost server
 - The file is transpiled with esbuild, so TypeScript syntax is fine, but full `tsc` type-checking is not run
 - Inline mode is available through `--eval` / `-e`; it uses the current working directory as the base for relative imports
 - For `--eval` and stdin, a bare JSX expression like `<h1>Hello</h1>` is automatically wrapped into a default component
@@ -86,6 +87,7 @@ export default function App() {
 
 - External `.css` imports are not loaded as real stylesheets in the current host path, so prefer inline styles, CSS-in-JS, or self-contained component styling
 - The entry is treated as a React app root, so a plain script file with side effects but no exported component is not the intended shape
+- String asset paths are document-relative to the project root, not module-relative to the JSX file they appear in
 - Inline mode is not file-watched, since there is no source file to reload from
 - Stdin mode is also not file-watched
 - `--serve` hot-reloads by fetching the newest bundle into the page; it does not preserve React state the way the desktop host can
