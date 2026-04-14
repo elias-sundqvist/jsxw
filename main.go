@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -124,6 +125,7 @@ type appMode struct {
 	serve           bool
 	serveHost       string
 	servePort       int
+	allowRemote     bool
 }
 
 type appBundleStore struct {
@@ -194,7 +196,7 @@ func main() {
 			log.Fatal(err)
 		}
 		bundleStore = newAppBundleStore(initialBundle)
-		finalHTML, err = buildWindowLoaderHTML(appRoot)
+		finalHTML, err = buildWindowLoaderHTML(appRoot, mode)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -338,6 +340,8 @@ func detectAppMode(appRoot string, args []string) (appMode, error) {
 			mode.setDefaultAssoc = true
 		case "--serve":
 			mode.serve = true
+		case "--allow-remote":
+			mode.allowRemote = true
 		case "--host":
 			if i+1 >= len(args) {
 				return appMode{}, fmt.Errorf("--host requires a hostname or IP address")
@@ -387,7 +391,7 @@ func detectAppMode(appRoot string, args []string) (appMode, error) {
 	}
 
 	if mode.showHelp || mode.showVersion || mode.register {
-		if entryArg != "" || inlineCode != "" || useStdin || loaderExplicit || mode.serve || portExplicit || hostExplicit {
+		if entryArg != "" || inlineCode != "" || useStdin || loaderExplicit || mode.serve || portExplicit || hostExplicit || mode.allowRemote {
 			return appMode{}, fmt.Errorf("cannot combine %s with entry, eval, stdin, or loader flags", firstMetaFlag(mode))
 		}
 		if mode.setDefaultAssoc && !mode.register {
@@ -420,6 +424,7 @@ func detectAppMode(appRoot string, args []string) (appMode, error) {
 			serve:         mode.serve,
 			serveHost:     mode.serveHost,
 			servePort:     mode.servePort,
+			allowRemote:   mode.allowRemote,
 		}, nil
 	}
 
@@ -451,6 +456,7 @@ func detectAppMode(appRoot string, args []string) (appMode, error) {
 			serve:         mode.serve,
 			serveHost:     mode.serveHost,
 			servePort:     mode.servePort,
+			allowRemote:   mode.allowRemote,
 		}, nil
 	}
 
@@ -487,6 +493,7 @@ func detectAppMode(appRoot string, args []string) (appMode, error) {
 		serve:       mode.serve,
 		serveHost:   mode.serveHost,
 		servePort:   mode.servePort,
+		allowRemote: mode.allowRemote,
 	}, nil
 }
 
@@ -508,7 +515,9 @@ func cliUsage() string {
 jsxx --eval "<h1>Hello</h1>"
 jsxx --eval "export default function App() { return <div>Hello</div> }"
 jsxx --eval "export default function App() { return <div>Hello</div> }" --loader tsx
+jsxx --allow-remote .\app.jsx
 jsxx --serve .\app.jsx
+jsxx --serve --allow-remote .\app.jsx
 jsxx --serve --port 3000 .\app.jsx
 echo "<h1>Hello</h1>" | jsxx --loader jsx
 echo "export default function App() { return <div>Hello</div> }" | jsxx
@@ -594,7 +603,7 @@ func normalizeInlineSource(source string) string {
 }
 
 func buildHTML(appRoot string, mode appMode) (string, error) {
-	idx, err := loadIndexHTML(appRoot)
+	idx, err := loadIndexHTML(appRoot, mode)
 	if err != nil {
 		return "", err
 	}
@@ -608,15 +617,15 @@ func buildHTML(appRoot string, mode appMode) (string, error) {
 }
 
 func buildHostLoaderHTML(appRoot string) (string, error) {
-	idx, err := loadIndexHTML(appRoot)
+	idx, err := loadIndexHTML(appRoot, appMode{})
 	if err != nil {
 		return "", err
 	}
 	return injectJS(idx, hostBundleLoaderJS), nil
 }
 
-func buildWindowLoaderHTML(appRoot string) (string, error) {
-	idx, err := loadIndexHTML(appRoot)
+func buildWindowLoaderHTML(appRoot string, mode appMode) (string, error) {
+	idx, err := loadIndexHTML(appRoot, mode)
 	if err != nil {
 		return "", err
 	}
@@ -624,8 +633,8 @@ func buildWindowLoaderHTML(appRoot string) (string, error) {
 	return injectJS(idx, windowBundleLoaderJS), nil
 }
 
-func buildServeLoaderHTML(appRoot string) (string, error) {
-	idx, err := loadIndexHTML(appRoot)
+func buildServeLoaderHTML(appRoot string, mode appMode) (string, error) {
+	idx, err := loadIndexHTML(appRoot, mode)
 	if err != nil {
 		return "", err
 	}
@@ -660,13 +669,35 @@ func buildAppBundle(appRoot string, mode appMode) (string, error) {
 	return jsBundle, nil
 }
 
-func loadIndexHTML(appRoot string) (string, error) {
+func loadIndexHTML(appRoot string, mode appMode) (string, error) {
 	b, err := os.ReadFile(filepath.Join(appRoot, "web", "index.html"))
 	if err != nil {
-		return indexHTML, nil
+		return applyContentSecurityPolicy(indexHTML, mode), nil
 	}
-	return string(b), nil
+	return applyContentSecurityPolicy(string(b), mode), nil
 }
+
+var cspMetaPattern = regexp.MustCompile(`(?is)<meta\b[^>]*http-equiv=["']Content-Security-Policy["'][^>]*>`)
+
+func applyContentSecurityPolicy(html string, mode appMode) string {
+	policy := strictContentSecurityPolicy
+	if mode.allowRemote {
+		policy = relaxedContentSecurityPolicy
+	}
+
+	metaTag := `<meta http-equiv="Content-Security-Policy" content="` + policy + `">`
+	if cspMetaPattern.MatchString(html) {
+		return cspMetaPattern.ReplaceAllString(html, metaTag)
+	}
+	if strings.Contains(html, "<head>") {
+		return strings.Replace(html, "<head>", "<head>\n    "+metaTag, 1)
+	}
+	return metaTag + html
+}
+
+const strictContentSecurityPolicy = `default-src 'self' 'unsafe-inline' data: blob:; connect-src 'self' data: blob: https://assets.jsxw.local; img-src 'self' data: blob: https://assets.jsxw.local; media-src 'self' data: blob: https://assets.jsxw.local; font-src 'self' data: blob: https://assets.jsxw.local;`
+
+const relaxedContentSecurityPolicy = `default-src * 'unsafe-inline' data: blob:; script-src * 'unsafe-inline' data: blob:; style-src * 'unsafe-inline' data: blob:; connect-src * data: blob: ws: wss:; img-src * data: blob:; media-src * data: blob:; font-src * data: blob:; worker-src * data: blob:;`
 
 // loadSources reads from disk for hot reloading
 func loadDefaultSources(appRoot string) (js, css string, err error) {
@@ -1538,7 +1569,7 @@ func runServeMode(appRoot string, mode appMode) error {
 		return err
 	}
 	debugServef("serve: building loader html")
-	indexHTML, err := buildServeLoaderHTML(appRoot)
+	indexHTML, err := buildServeLoaderHTML(appRoot, mode)
 	if err != nil {
 		return err
 	}

@@ -30,7 +30,9 @@ jsxx C:\path\to\widget.ts
 jsxx --eval "<h1>Hello</h1>"
 jsxx --eval "export default function App() { return <div>Hello</div> }"
 jsxx --eval "export default function App() { return <div>Hello</div> }" --loader jsx
+jsxx --allow-remote .\app.jsx
 jsxx --serve .\app.jsx
+jsxx --serve --allow-remote .\app.jsx
 jsxx --serve --port 3000 .\app.jsx
 "<h1>Hello</h1>" | jsxx --loader jsx
 "export default function App() { return <div>Hello</div> }" | jsxx
@@ -82,6 +84,7 @@ export default function App() {
 - Piped stdin is also supported; it is treated like inline source and also resolves relative imports from the current working directory
 - `--serve` starts a local HTTP server instead of opening a desktop window and prints the URL to stdout
 - `--port` and `--host` can be used with `--serve`; by default it serves on `127.0.0.1` and picks an available port
+- `--allow-remote` relaxes the host page CSP so remote scripts, styles, fetches, workers, WASM downloads, fonts, images, and media can load
 
 ### Current Limitations
 
@@ -91,6 +94,7 @@ export default function App() {
 - Inline mode is not file-watched, since there is no source file to reload from
 - Stdin mode is also not file-watched
 - `--serve` hot-reloads by fetching the newest bundle into the page; it does not preserve React state the way the desktop host can
+- By default, desktop windows use a restrictive CSP. If your app needs CDN imports, remote fetches, or cross-origin WASM/assets, launch it with `--allow-remote`
 
 ## Host Integration
 
