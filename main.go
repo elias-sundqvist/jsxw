@@ -695,9 +695,9 @@ func applyContentSecurityPolicy(html string, mode appMode) string {
 	return metaTag + html
 }
 
-const strictContentSecurityPolicy = `default-src 'self' 'unsafe-inline' data: blob:; connect-src 'self' data: blob: https://assets.jsxw.local; img-src 'self' data: blob: https://assets.jsxw.local; media-src 'self' data: blob: https://assets.jsxw.local; font-src 'self' data: blob: https://assets.jsxw.local;`
+const strictContentSecurityPolicy = `default-src 'self' 'unsafe-inline' data: blob:; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' data: blob:; connect-src 'self' data: blob: https://assets.jsxw.local; img-src 'self' data: blob: https://assets.jsxw.local; media-src 'self' data: blob: https://assets.jsxw.local; font-src 'self' data: blob: https://assets.jsxw.local; worker-src 'self' data: blob: https://assets.jsxw.local;`
 
-const relaxedContentSecurityPolicy = `default-src * 'unsafe-inline' data: blob:; script-src * 'unsafe-inline' data: blob:; style-src * 'unsafe-inline' data: blob:; connect-src * data: blob: ws: wss:; img-src * data: blob:; media-src * data: blob:; font-src * data: blob:; worker-src * data: blob:;`
+const relaxedContentSecurityPolicy = `default-src * 'unsafe-inline' data: blob:; script-src * 'unsafe-inline' 'wasm-unsafe-eval' data: blob:; style-src * 'unsafe-inline' data: blob:; connect-src * data: blob: ws: wss:; img-src * data: blob:; media-src * data: blob:; font-src * data: blob:; worker-src * data: blob:;`
 
 // loadSources reads from disk for hot reloading
 func loadDefaultSources(appRoot string) (js, css string, err error) {

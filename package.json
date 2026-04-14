@@ -1,6 +1,6 @@
 {
   "name": "jsx-window",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Run JSX and TSX files as native desktop windows on Windows.",
   "main": "bin/jsxx.js",
   "bin": {
